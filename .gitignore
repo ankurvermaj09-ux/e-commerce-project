@@ -1,3 +1,4 @@
+<<<<<<< HEAD
 .env
 *.env
 .env.*
@@ -26,3 +27,27 @@ backend/uploads/
 .vscode/
 .DS_Store
 *.log
+=======
+# Python
+.venv
+__pycache__
+*.pyc
+
+# Environment variables
+.env
+
+# Node
+node_modules
+
+# Build folders
+dist
+build
+
+# IDE
+.vscode
+.idea
+
+# OS
+.DS_Store
+Thumbs.db
+>>>>>>> origin/main
