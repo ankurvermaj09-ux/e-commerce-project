@@ -22,7 +22,8 @@ from microservices.common.config import (
     ALGORITHM,
     REVIEW_DB_NAME,
     PRODUCT_DB_NAME,
-    ORDER_DB_NAME
+    ORDER_DB_NAME,
+    AUTH_DB_NAME
 )
 
 from datetime import datetime
@@ -42,16 +43,14 @@ app = FastAPI()
 # =========================
 
 review_db = client[REVIEW_DB_NAME]
-
 product_db = client[PRODUCT_DB_NAME]
-
 order_db = client[ORDER_DB_NAME]
+auth_db = client[AUTH_DB_NAME]
 
 reviews_collection = review_db["reviews"]
-
 products_collection = product_db["products"]
-
 order_collection = order_db["orders"]
+users_collection = auth_db["users"]
 
 
 # =========================
@@ -148,16 +147,25 @@ async def add_reviews(
             detail="You already reviewed this product"
         )
 
+    # Resolve username at write time from auth_db users (fallback to email prefix)
+    user_doc = await users_collection.find_one({"user_id": verified_user_id})
+    username = user.get("email", "").split("@")[0] if user.get("email") else f"User {verified_user_id}"
+
+    if user_doc:
+        profile = user_doc.get("profile")
+        if isinstance(profile, dict) and profile.get("full_name"):
+            username = profile["full_name"]
+        elif user_doc.get("name"):
+            username = user_doc["name"]
+        elif user_doc.get("email"):
+            username = user_doc["email"].split("@")[0]
+
     new_review_data = {
-
         "user_id": verified_user_id,
-
         "product_id": product_id,
-
+        "username": username,
         "rating": review_data.rating,
-
         "comment": review_data.comment,
-
         "created_at": datetime.now()
     }
 
@@ -170,52 +178,29 @@ async def add_reviews(
     }
 
 
+@app.get("/{product_id}")
+@app.get("/reviews/{product_id}")
 @app.get("/products/{product_id}/reviews")
 async def get_reviews(product_id: int):
 
-    pipeline = [
-
+    cursor = reviews_collection.find(
+        {"product_id": product_id},
         {
-            "$match": {
-                "product_id": product_id
-            }
-        },
-
-        {
-            "$lookup": {
-                "from": "users",
-                "localField": "user_id",
-                "foreignField": "user_id",
-                "as": "user_info"
-            }
-        },
-
-        {
-            "$unwind": "$user_info"
-        },
-
-        {
-            "$project": {
-                "_id": 1,
-                "rating": 1,
-                "comment": 1,
-                "created_at": 1,
-                "username": "$user_info.name"
-            }
+            "_id": 1,
+            "product_id": 1,
+            "user_id": 1,
+            "username": 1,
+            "rating": 1,
+            "comment": 1,
+            "created_at": 1
         }
-    ]
-
-    cursor = reviews_collection.aggregate(
-        pipeline
     )
 
     reviews = await cursor.to_list(length=None)
 
     for r in reviews:
-
         r["_id"] = str(r["_id"])
+        if "username" not in r or not r["username"]:
+            r["username"] = f"User {r.get('user_id', '')}"
 
     return reviews
-
-
-# uvicorn microservices.review_service.main:app --reload --port 8006

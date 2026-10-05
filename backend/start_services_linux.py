@@ -23,16 +23,22 @@ processes = []
 
 print("Starting all microservices for Linux...\n")
 
+env = {**os.environ, "PYTHONPATH": script_dir}
+
+host = os.getenv("HOST", "0.0.0.0")
+
 for name, module, reload_dir, port in services:
+    service_cwd = os.path.join(script_dir, reload_dir)
     cmd = [
         python_exec, "-m", "uvicorn", module,
+        "--host", host,
         "--reload",
-        "--reload-dir", reload_dir,
+        "--reload-dir", service_cwd,
         "--port", str(port)
     ]
-    process = subprocess.Popen(cmd)
+    process = subprocess.Popen(cmd, cwd=service_cwd, env=env)
     processes.append(process)
-    print(f"[{name}] service running on http://127.0.0.1:{port}")
+    print(f"[{name}] service running on http://{host}:{port}")
     time.sleep(0.5)
 
 print(f"\nAll {len(services)} services started successfully! Press Ctrl+C to terminate all services.\n")

@@ -16,6 +16,13 @@ function AdminDashboard({
   cancelledCost,
   products = [],
   loadProducts,
+  loadAdminStats,
+  loadAdminOrders,
+  loadBestSellers,
+  loadPendingCost,
+  loadCancelledCost,
+  loadOrderRatio,
+  loadCategorySales,
   orderRatio,
   categorySales,
 }) {
@@ -35,6 +42,7 @@ function AdminDashboard({
     images: []
   });
 
+  const ordersList = Array.isArray(adminOrders) ? adminOrders : (adminOrders?.orders || []);
   const lowStockProducts = products?.filter(p => p.qty < 5) || [];
   const totalStockValue = products?.reduce((acc, p) => acc + (p.price * p.qty), 0) || 0;
   const totalItemCount = products?.reduce((acc, p) => acc + p.qty, 0) || 0;
@@ -48,6 +56,51 @@ function AdminDashboard({
   useEffect(() => {
     loadTopCustomers();
   }, []);
+
+  // --- POLLING INTERVALS ---
+  // Dashboard polling (30 sec)
+  useEffect(() => {
+    const dashboardInterval = setInterval(() => {
+      if (loadAdminStats) loadAdminStats();
+      if (loadBestSellers) loadBestSellers();
+      loadTopCustomers();
+    }, 30000);
+    return () => clearInterval(dashboardInterval);
+  }, [loadAdminStats, loadBestSellers]);
+
+  // Orders polling (10 sec)
+  useEffect(() => {
+    const ordersInterval = setInterval(() => {
+      if (loadAdminOrders) loadAdminOrders();
+    }, 10000);
+    return () => clearInterval(ordersInterval);
+  }, [loadAdminOrders]);
+
+  // Inventory polling (30 sec)
+  useEffect(() => {
+    const inventoryInterval = setInterval(() => {
+      if (loadProducts) loadProducts();
+    }, 30000);
+    return () => clearInterval(inventoryInterval);
+  }, [loadProducts]);
+
+  // Analytics polling (60 sec)
+  useEffect(() => {
+    const analyticsInterval = setInterval(() => {
+      if (loadOrderRatio) loadOrderRatio();
+      if (loadCategorySales) loadCategorySales();
+    }, 60000);
+    return () => clearInterval(analyticsInterval);
+  }, [loadOrderRatio, loadCategorySales]);
+
+  // Finance polling (60 sec)
+  useEffect(() => {
+    const financeInterval = setInterval(() => {
+      if (loadPendingCost) loadPendingCost();
+      if (loadCancelledCost) loadCancelledCost();
+    }, 60000);
+    return () => clearInterval(financeInterval);
+  }, [loadPendingCost, loadCancelledCost]);
 
   const openEditModal = (product) => {
     if (!product) return;
@@ -108,9 +161,9 @@ function AdminDashboard({
   };
 
   const exportOrdersToCSV = () => {
-    if (!adminOrders || adminOrders.length === 0) return alert("No orders to export!");
+    if (!ordersList || ordersList.length === 0) return alert("No orders to export!");
     const headers = ["Order ID", "Date", "Customer Email", "Total Amount (₹)", "Status", "Items"];
-    const rows = adminOrders.map(order => [
+    const rows = ordersList.map(order => [
       order._id,
       new Date(order.created_at).toLocaleDateString('en-IN'),
       order.email,
@@ -165,14 +218,42 @@ function AdminDashboard({
             className={activeTab === "stats" ? "active" : ""}
             onClick={() => setActiveTab("stats")}
           >
-            Overview
+            Dashboard
           </button>
 
           <button
             className={activeTab === "orders" ? "active" : ""}
             onClick={() => setActiveTab("orders")}
           >
-            Manage Orders
+            Orders (10s)
+          </button>
+
+          <button
+            className={activeTab === "tickets" ? "active" : ""}
+            onClick={() => setActiveTab("tickets")}
+          >
+            Support Tickets (10s)
+          </button>
+
+          <button
+            className={activeTab === "stock" ? "active" : ""}
+            onClick={() => setActiveTab("stock")}
+          >
+            Inventory (30s)
+          </button>
+
+          <button
+            className={activeTab === "analytics" ? "active" : ""}
+            onClick={() => setActiveTab("analytics")}
+          >
+            Analytics (60s)
+          </button>
+
+          <button
+            className={activeTab === "finance" ? "active" : ""}
+            onClick={() => setActiveTab("finance")}
+          >
+            Finance (60s)
           </button>
 
           <button
@@ -180,20 +261,6 @@ function AdminDashboard({
             onClick={() => setActiveTab("users")}
           >
             User Search
-          </button>
-
-          <button
-            className={activeTab === "stock" ? "active" : ""}
-            onClick={() => setActiveTab("stock")}
-          >
-            Stock Management
-          </button>
-
-          <button
-            className={activeTab === "tickets" ? "active" : ""}
-            onClick={() => setActiveTab("tickets")}
-          >
-            Support Tickets
           </button>
         </nav>
       </aside>
@@ -310,24 +377,28 @@ function AdminDashboard({
             <h1>Order Management</h1>
             <button onClick={exportOrdersToCSV} className="export-btn">Download CSV Report</button>
             <div className="orders-list">
-              {[...(adminOrders || [])].reverse().map((order) => (
-                <div key={order._id} className="order-card-admin glass">
-                  <div className="order-header">
-                    <p><strong>Order ID:</strong> {order.order_id || order._id}</p>
-                    <select
-                      value={order.status}
-                      className={`status-select ${order.status}`}
-                      onChange={(e) => updateOrderStatus(order.order_id || order._id, e.target.value)}
-                      disabled={["delivered", "cancelled"].includes(order.status)}
-                    >
-                      <option value="pending">Pending</option>
-                      <option value="shipped">Shipped</option>
-                      <option value="delivered">Delivered</option>
-                      <option value="cancelled">Cancelled</option>
-                    </select>
+              {ordersList.length === 0 ? (
+                <p style={{ marginTop: "20px", color: "#888" }}>No orders found.</p>
+              ) : (
+                [...ordersList].reverse().map((order) => (
+                  <div key={order._id || order.order_id} className="order-card-admin glass">
+                    <div className="order-header">
+                      <p><strong>Order ID:</strong> {order.order_id || order._id}</p>
+                      <select
+                        value={order.status}
+                        className={`status-select ${order.status}`}
+                        onChange={(e) => updateOrderStatus(order.order_id || order._id, e.target.value)}
+                        disabled={["delivered", "cancelled"].includes(order.status)}
+                      >
+                        <option value="pending">Pending</option>
+                        <option value="shipped">Shipped</option>
+                        <option value="delivered">Delivered</option>
+                        <option value="cancelled">Cancelled</option>
+                      </select>
+                    </div>
                   </div>
-                </div>
-              ))}
+                ))
+              )}
             </div>
           </div>
         )}
@@ -430,6 +501,47 @@ function AdminDashboard({
         {activeTab === "tickets" && (
           <div className="tab-content animate-fade">
             <AdminTickets />
+          </div>
+        )}
+
+        {activeTab === "analytics" && (
+          <div className="tab-content animate-fade">
+            <h1>Analytics & Insights</h1>
+            <p className="tab-polling-badge">⚡ Auto-refreshing every 60s</p>
+
+            <h2 style={{ marginTop: "30px" }}>Monthly Revenue Trend</h2>
+            {monthly && monthly.length > 0 ? (
+              <RevenueChart data={monthly} />
+            ) : (
+              <p>No revenue data available.</p>
+            )}
+
+            <h2 style={{ margin: "40px 0 20px" }}>Order Status Ratio</h2>
+            {orderRatio ? (<OrderRationChart data={orderRatio} />) : (<p>Loading ratio...</p>)}
+
+            <h2 style={{ marginTop: "40px" }}>Category-wise Sales</h2>
+            {categorySales ? (
+              <CategorySalesChart data={categorySales} />
+            ) : (
+              <p>Loading category sales...</p>
+            )}
+          </div>
+        )}
+
+        {activeTab === "finance" && (
+          <div className="tab-content animate-fade">
+            <h1>Financial Overview</h1>
+            <p className="tab-polling-badge">⚡ Auto-refreshing every 60s</p>
+
+            <div className="stats-grid" style={{ marginTop: "20px" }}>
+              <div className="stat-card"><h3>₹{stats?.total_revenue || 0}</h3><p>Total Revenue</p></div>
+              <div className="stat-card"><h3>₹{monthly?.monthly_revenue || 0}</h3><p>Monthly Sales</p></div>
+              <div className="stat-card"><h3>₹{pendingCost?.pending_cost || 0}</h3><p>Pending Cost</p></div>
+              <div className="stat-card"><h3>₹{cancelledCost?.cancelled_cost || 0}</h3><p>Cancelled Cost</p></div>
+              <div className="stat-card"><h3>₹{stats?.average_order_value || 0}</h3><p>Avg Order Value</p></div>
+              <div className="stat-card"><h3>{stats?.revenue_growth || 0}%</h3><p>Revenue Growth</p></div>
+              <div className="stat-card"><h3>{stats?.cancellation_rate || 0}%</h3><p>Cancellation Rate</p></div>
+            </div>
           </div>
         )}
 

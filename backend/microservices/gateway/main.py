@@ -1,11 +1,31 @@
+from contextlib import asynccontextmanager
 from fastapi import FastAPI, Request, HTTPException
+from fastapi.responses import Response, JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 import httpx
-from microservices.common.database import client
 
-app = FastAPI()
+from microservices.common.config import (
+    CORS_ORIGINS,
+    AUTH_SERVICE_URL,
+    PRODUCT_SERVICE_URL,
+    CART_SERVICE_URL,
+    ORDER_SERVICE_URL,
+    ADMIN_SERVICE_URL,
+    REVIEW_SERVICE_URL,
+    WISHLIST_SERVICE_URL,
+    TICKET_SERVICE_URL
+)
 
-db = client["test_db"]
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    app.state.http = httpx.AsyncClient(
+        timeout=httpx.Timeout(10.0, connect=2.0),
+        limits=httpx.Limits(max_keepalive_connections=100, max_connections=200),
+    )
+    yield
+    await app.state.http.aclose()
+
+app = FastAPI(lifespan=lifespan)
 
 # ==============================
 # CORS
@@ -13,7 +33,7 @@ db = client["test_db"]
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=CORS_ORIGINS,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -23,18 +43,23 @@ app.add_middleware(
 # SERVICE URLS
 # ==============================
 
-AUTH_SERVICE = "http://127.0.0.1:8001"
-PRODUCT_SERVICE = "http://127.0.0.1:8002"
-CART_SERVICE = "http://127.0.0.1:8003"
-ORDER_SERVICE = "http://127.0.0.1:8004"
-ADMIN_SERVICE = "http://127.0.0.1:8005"
-REVIEW_SERVICE = "http://127.0.0.1:8006"
-WISHLIST_SERVICE = "http://127.0.0.1:8007"
-TICKET_SERVICE = "http://127.0.0.1:8008"
+AUTH_SERVICE = AUTH_SERVICE_URL
+PRODUCT_SERVICE = PRODUCT_SERVICE_URL
+CART_SERVICE = CART_SERVICE_URL
+ORDER_SERVICE = ORDER_SERVICE_URL
+ADMIN_SERVICE = ADMIN_SERVICE_URL
+REVIEW_SERVICE = REVIEW_SERVICE_URL
+WISHLIST_SERVICE = WISHLIST_SERVICE_URL
+TICKET_SERVICE = TICKET_SERVICE_URL
 
 # ==============================
 # HELPER FUNCTION
 # ==============================
+
+HOP_BY_HOP = {
+    "host", "content-length", "connection",
+    "transfer-encoding", "keep-alive", "upgrade"
+}
 
 async def forward_request(
     request: Request,
@@ -43,12 +68,15 @@ async def forward_request(
 ):
     url = f"{service_url}{path}"
 
-    headers = dict(request.headers)
+    headers = {
+        k: v for k, v in request.headers.items()
+        if k.lower() not in HOP_BY_HOP
+    }
 
     body = await request.body()
+    client = request.app.state.http
 
-    async with httpx.AsyncClient() as client:
-
+    try:
         response = await client.request(
             method=request.method,
             url=url,
@@ -56,14 +84,21 @@ async def forward_request(
             params=request.query_params,
             content=body
         )
-
-    try:
-        return response.json()
-    except Exception:
-        return {
-            "status_code": response.status_code,
-            "content": response.text
-        }
+        return Response(
+            content=response.content,
+            status_code=response.status_code,
+            headers={"content-type": response.headers.get("content-type", "application/json")}
+        )
+    except httpx.TimeoutException:
+        return JSONResponse(
+            status_code=504,
+            content={"detail": f"Gateway timeout communicating with downstream service at {service_url}"}
+        )
+    except httpx.RequestError as exc:
+        return JSONResponse(
+            status_code=502,
+            content={"detail": f"Bad Gateway: Unable to reach downstream service at {service_url} ({exc})"}
+        )
 
 # ==============================
 # AUTH SERVICE
@@ -296,13 +331,4 @@ async def admin_gateway(path: str, request: Request):
 def home():
     return {
         "message": "API Gateway Running"
-
-
     }
-
-@app.get("/test-db")
-async def test_db():
-    result = await db.test.insert_one({"message": "Atlas Connected"})
-    return {"inserted_id": str(result.inserted_id)}
-
-#uvicorn microservices.gateway.main:app --reload --port 8000

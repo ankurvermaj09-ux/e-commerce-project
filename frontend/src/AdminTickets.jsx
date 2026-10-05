@@ -36,6 +36,14 @@ export default function AdminTickets() {
   useEffect(() => {
     loadStats();
     loadTickets();
+
+    // 10-second polling interval for Tickets
+    const interval = setInterval(() => {
+      loadStats();
+      loadTickets();
+    }, 10000);
+
+    return () => clearInterval(interval);
   }, [statusFilter]);
 
   const handleSearchChange = (e) => {

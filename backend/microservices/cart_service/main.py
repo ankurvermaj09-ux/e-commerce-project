@@ -92,9 +92,10 @@ async def add_to_cart(
 ):
 
     user_id = user["user_id"]
+    pid = int(product_id)
 
     product = await product_collection.find_one(
-        {"product_id": int(product_id)}
+        {"product_id": pid}
     )
 
     if not product:
@@ -104,52 +105,60 @@ async def add_to_cart(
             detail="Product not found"
         )
 
-    cart = await cart_collection.find_one(
-        {"user_id": user_id}
+    product_qty = product.get("qty", 0)
+
+    res = await cart_collection.update_one(
+        {
+            "user_id": user_id,
+            "items": {
+                "$elemMatch": {
+                    "product_id": pid,
+                    "qty": {"$lt": product_qty}
+                }
+            }
+        },
+        {"$inc": {"items.$.qty": 1}}
     )
 
-    if not cart:
-        cart = {
-            "user_id": user_id,
-            "items": []
+    if res.matched_count == 0:
+
+        existing_item = await cart_collection.find_one(
+            {"user_id": user_id, "items.product_id": pid}
+        )
+
+        if existing_item:
+
+            raise HTTPException(
+                status_code=400,
+                detail="Out of stock"
+            )
+
+        if product_qty < 1:
+
+            raise HTTPException(
+                status_code=400,
+                detail="Out of stock"
+            )
+
+        new_item = {
+            "product_id": product["product_id"],
+            "name": product.get("name", ""),
+            "price": product.get("price", 0),
+            "qty": 1,
+            "image": product.get("image", "")
         }
 
-    items = cart.get("items", [])
+        await cart_collection.update_one(
+            {"user_id": user_id},
+            {"$push": {"items": new_item}},
+            upsert=True
+        )
 
-    found = False
-
-    for item in items:
-
-        if item["product_id"] == int(product_id):
-
-            if item["qty"] + 1 > product["qty"]:
-
-                raise HTTPException(
-                    status_code=400,
-                    detail="Out of stock"
-                )
-
-            item["qty"] += 1
-
-            found = True
-
-            break
-
-    if not found:
-
-        items.append({
-            "product_id": product["product_id"],
-            "name": product["name"],
-            "price": product["price"],
-            "qty": 1,
-            "image": product["image"]
-        })
-
-    await cart_collection.update_one(
+    updated_cart = await cart_collection.find_one(
         {"user_id": user_id},
-        {"$set": {"items": items}},
-        upsert=True
+        {"_id": 0}
     )
+    items = updated_cart.get("items", []) if updated_cart else []
 
     return {
         "message": "Cart updated",
@@ -193,19 +202,11 @@ async def increase_cart(
     user=Depends(get_current_user)
 ):
 
-    cart = await cart_collection.find_one({
-        "user_id": user["user_id"]
-    })
-
-    if not cart:
-
-        raise HTTPException(
-            status_code=404,
-            detail="Cart not found"
-        )
+    user_id = user["user_id"]
+    pid = int(product_id)
 
     product = await product_collection.find_one({
-        "product_id": product_id
+        "product_id": pid
     })
 
     if not product:
@@ -215,34 +216,17 @@ async def increase_cart(
             detail="Product not found"
         )
 
-    item_found = False
+    product_qty = product.get("qty", 0)
 
-    for item in cart["items"]:
-
-        if item["product_id"] == product_id:
-
-            item_found = True
-
-            if item["qty"] + 1 > product["qty"]:
-
-                raise HTTPException(
-                    status_code=400,
-                    detail="Out of stock"
-                )
-
-            break
-
-    if not item_found:
-
-        raise HTTPException(
-            status_code=404,
-            detail="Item not found in cart"
-        )
-
-    await cart_collection.update_one(
+    res = await cart_collection.update_one(
         {
-            "user_id": user["user_id"],
-            "items.product_id": product_id
+            "user_id": user_id,
+            "items": {
+                "$elemMatch": {
+                    "product_id": pid,
+                    "qty": {"$lt": product_qty}
+                }
+            }
         },
         {
             "$inc": {
@@ -251,17 +235,12 @@ async def increase_cart(
         }
     )
 
-    return {"message": "Item quantity increased"}
+    if res.matched_count > 0:
 
-
-@app.put("/cart/decrease")
-async def decrease_cart(
-    product_id: int = Query(...),
-    user=Depends(get_current_user)
-):
+        return {"message": "Item quantity increased"}
 
     cart = await cart_collection.find_one({
-        "user_id": user["user_id"]
+        "user_id": user_id
     })
 
     if not cart:
@@ -271,53 +250,84 @@ async def decrease_cart(
             detail="Cart not found"
         )
 
-    item_found = False
+    item_in_cart = any(item.get("product_id") == pid for item in cart.get("items", []))
 
-    for item in cart["items"]:
-
-        if item["product_id"] == product_id:
-
-            item_found = True
-
-            if item["qty"] > 1:
-
-                await cart_collection.update_one(
-                    {
-                        "user_id": user["user_id"],
-                        "items.product_id": product_id
-                    },
-                    {
-                        "$inc": {
-                            "items.$.qty": -1
-                        }
-                    }
-                )
-
-            else:
-
-                await cart_collection.update_one(
-                    {
-                        "user_id": user["user_id"]
-                    },
-                    {
-                        "$pull": {
-                            "items": {
-                                "product_id": product_id
-                            }
-                        }
-                    }
-                )
-
-            break
-
-    if not item_found:
+    if not item_in_cart:
 
         raise HTTPException(
             status_code=404,
             detail="Item not found in cart"
         )
 
-    return {"message": "Item quantity updated"}
+    raise HTTPException(
+        status_code=400,
+        detail="Out of stock"
+    )
+
+
+@app.put("/cart/decrease")
+async def decrease_cart(
+    product_id: int = Query(...),
+    user=Depends(get_current_user)
+):
+
+    user_id = user["user_id"]
+    pid = int(product_id)
+
+    res = await cart_collection.update_one(
+        {
+            "user_id": user_id,
+            "items": {
+                "$elemMatch": {
+                    "product_id": pid,
+                    "qty": {"$gt": 1}
+                }
+            }
+        },
+        {
+            "$inc": {
+                "items.$.qty": -1
+            }
+        }
+    )
+
+    if res.matched_count > 0:
+
+        return {"message": "Item quantity updated"}
+
+    res2 = await cart_collection.update_one(
+        {
+            "user_id": user_id,
+            "items.product_id": pid
+        },
+        {
+            "$pull": {
+                "items": {
+                    "product_id": pid
+                }
+            }
+        }
+    )
+
+    if res2.matched_count > 0:
+
+        return {"message": "Item quantity updated"}
+
+    cart = await cart_collection.find_one({
+        "user_id": user_id
+    })
+
+    if not cart:
+
+        raise HTTPException(
+            status_code=404,
+            detail="Cart not found"
+        )
+
+    raise HTTPException(
+        status_code=404,
+        detail="Item not found in cart"
+    )
 
 
 # uvicorn microservices.cart_service.main:app --reload --port 8003

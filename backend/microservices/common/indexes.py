@@ -61,6 +61,7 @@ async def ensure_indexes(client: AsyncIOMotorClient) -> bool:
     auth_db = client[AUTH_DB_NAME]
     await auth_db["users"].create_index("email", unique=True)
     await auth_db["users"].create_index("user_id", unique=True)
+    await auth_db["users"].create_index("profile.full_name")
 
     product_db = client[PRODUCT_DB_NAME]
     await product_db["products"].create_index("product_id", unique=True)

@@ -11,7 +11,7 @@ from fastapi.security import (
     HTTPAuthorizationCredentials
 )
 
-from microservices.common.database import client
+from microservices.common.database import client, next_sequence
 
 from microservices.common.config import (
     AUTH_DB_NAME,
@@ -24,9 +24,8 @@ app = FastAPI()
 
 db = client[AUTH_DB_NAME]
 
-users = db["users"]
-
 user_collection = db["users"]
+counters_collection = db["counters"]
 
 security = HTTPBearer()
 
@@ -76,7 +75,7 @@ def health():
 @app.get("/count-users")
 async def count_users():
 
-    count = await users.count_documents({})
+    count = await user_collection.count_documents({})
 
     return {"count": count}
 
@@ -151,14 +150,7 @@ async def register(data: RegisterRequest):
             detail="Email already registered"
         )
 
-    last_user = await user_collection.find_one(
-        sort=[("user_id", -1)]
-    )
-
-    if last_user:
-        new_user_id = last_user["user_id"] + 1
-    else:
-        new_user_id = 1
+    new_user_id = await next_sequence(counters_collection, "user_id")
 
     user = {
         "user_id": new_user_id,
@@ -197,10 +189,6 @@ async def login(data: LoginRequest):
             status_code=401,
             detail="Invalid credentials"
         )
-
-    print(
-        f"--- LOGIN ATTEMPT --- Email received: {data.email}"
-    )
 
     token = create_access_token({
         "user_id": user["user_id"],

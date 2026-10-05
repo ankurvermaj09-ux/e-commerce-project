@@ -1,6 +1,9 @@
+import os
 import uuid
 from pymongo import MongoClient
-client = MongoClient("mongodb://localhost:27017")
+
+mongo_uri = os.getenv("MONGO_URI", "mongodb://localhost:27017")
+client = MongoClient(mongo_uri)
 db = client["minie"]
 order_collection = db["orders"]
 

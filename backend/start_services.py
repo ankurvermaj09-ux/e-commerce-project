@@ -27,21 +27,27 @@ processes = []
 
 print("Starting microservices...")
 
+env = {**os.environ, "PYTHONPATH": script_dir}
+
+host = os.getenv("HOST", "0.0.0.0")
+
 for name, module, reload_dir, port in services:
+    service_cwd = os.path.join(script_dir, reload_dir)
     if sys.platform == "win32":
-        command = f'title {name} && "{python_exec}" -m uvicorn {module} --reload --reload-dir {reload_dir} --port {port}'
-        process = subprocess.Popen(command, shell=True)
+        command = f'title {name} && "{python_exec}" -m uvicorn {module} --host {host} --reload --reload-dir "{service_cwd}" --port {port}'
+        process = subprocess.Popen(command, shell=True, cwd=service_cwd, env=env)
     else:
         cmd_args = [
             python_exec, "-m", "uvicorn", module,
+            "--host", host,
             "--reload",
-            "--reload-dir", reload_dir,
+            "--reload-dir", service_cwd,
             "--port", str(port)
         ]
-        process = subprocess.Popen(cmd_args)
+        process = subprocess.Popen(cmd_args, cwd=service_cwd, env=env)
 
     processes.append(process)
-    print(f"[{name}] started on http://127.0.0.1:{port}")
+    print(f"[{name}] started on http://{host}:{port}")
     time.sleep(0.5)
 
 print("\nAll services started. Press Ctrl+C to stop all.\n")

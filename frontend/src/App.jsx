@@ -183,7 +183,12 @@ export default function App() {
 
   const loadAdminOrders = () => {
     api.get("/api/admin/orders")
-      .then((res) => setAdminOrders(res.data))
+      .then((res) => {
+        const data = Array.isArray(res.data)
+          ? res.data
+          : (res.data?.orders || []);
+        setAdminOrders(data);
+      })
       .catch((err) => console.error("Admin orders failed:", err));
   };
 
@@ -542,7 +547,7 @@ export default function App() {
           <Route path="/forgot-password" element={<ForgotPassword />} />
           <Route path="/aboutus" element={<Aboutus />} />
           <Route path="/support" element={user ? <TicketRaiser /> : <Navigate to="/login" />} />
-          <Route path="/admin" element={user?.role === "admin" ? <AdminDashboard user={user} stats={stats} monthly={monthly} adminOrders={adminOrders} updateOrderStatus={updateOrderStatus} bestSellers={bestSellers} pendingCost={pendingCost} cancelledCost={cancelledCost} products={products} loadProducts={loadProducts} loadOrderRatio={loadOrderRatio} orderRatio={orderRatio} categorySales={categorySales} showSessionWarning={showSessionWarning} setShowSessionWarning={setShowSessionWarning} /> : <Pagenotfound />} />
+          <Route path="/admin" element={user?.role === "admin" ? <AdminDashboard user={user} stats={stats} monthly={monthly} adminOrders={adminOrders} updateOrderStatus={updateOrderStatus} bestSellers={bestSellers} pendingCost={pendingCost} cancelledCost={cancelledCost} products={products} loadProducts={loadProducts} loadAdminStats={loadAdminStats} loadAdminOrders={loadAdminOrders} loadBestSellers={loadBestSellers} loadPendingCost={loadPendingCost} loadCancelledCost={loadCancelledCost} loadOrderRatio={loadOrderRatio} loadCategorySales={loadCategorySales} orderRatio={orderRatio} categorySales={categorySales} showSessionWarning={showSessionWarning} setShowSessionWarning={setShowSessionWarning} /> : <Pagenotfound />} />
           <Route path="/register" element={<Register />} />
           <Route path="*" element={<Pagenotfound />} />
         </Routes>

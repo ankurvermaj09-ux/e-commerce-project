@@ -1,0 +1,97 @@
+services:
+
+  gateway:
+    build:
+      context: .
+      dockerfile: microservices/gateway/Dockerfile
+    container_name: gateway
+    env_file:
+      - microservices/gateway/.env
+    ports:
+      - "8000:8000"
+    networks:
+      - backend
+
+  auth_service:
+    build:
+      context: .
+      dockerfile: microservices/auth_service/Dockerfile
+    container_name: auth_service
+    env_file:
+      - microservices/auth_service/.env
+    networks:
+      - backend
+
+  product_service:
+    build:
+      context: .
+      dockerfile: microservices/product_service/Dockerfile
+    container_name: product_service
+    env_file:
+      - microservices/product_service/.env
+    networks:
+      - backend
+
+  cart_service:
+    build:
+      context: .
+      dockerfile: microservices/cart_service/Dockerfile
+    container_name: cart_service
+    env_file:
+      - microservices/cart_service/.env
+    networks:
+      - backend
+
+  order_service:
+    build:
+      context: .
+      dockerfile: microservices/order_service/Dockerfile
+    container_name: order_service
+    env_file:
+      - microservices/order_service/.env
+    networks:
+      - backend
+
+  admin_service:
+    build:
+      context: .
+      dockerfile: microservices/admin_service/Dockerfile
+    container_name: admin_service
+    env_file:
+      - microservices/admin_service/.env
+    networks:
+      - backend
+
+  review_service:
+    build:
+      context: .
+      dockerfile: microservices/review_service/Dockerfile
+    container_name: review_service
+    env_file:
+      - microservices/review_service/.env
+    networks:
+      - backend
+
+  wishlist_service:
+    build:
+      context: .
+      dockerfile: microservices/wishlist_service/Dockerfile
+    container_name: wishlist_service
+    env_file:
+      - microservices/wishlist_service/.env
+    networks:
+      - backend
+
+  ticket_service:
+    build:
+      context: .
+      dockerfile: microservices/ticket_service/Dockerfile
+    container_name: ticket_service
+    env_file:
+      - microservices/ticket_service/.env
+    networks:
+      - backend
+
+networks:
+  backend:
+    driver: bridge

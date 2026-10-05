@@ -1,41 +1,37 @@
 import shutil
 from calendar import month_abbr
+from datetime import datetime
+import os
+import re
 
-from fastapi import FastAPI,Depends,Header,HTTPException,Query,status,Form,UploadFile,File
-from fastapi.security import HTTPBearer,HTTPAuthorizationCredentials
+from fastapi import FastAPI, Depends, Header, HTTPException, Query, status, Form, UploadFile, File
+from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from pydantic import BaseModel
 from bson import ObjectId
-from pyexpat.errors import messages
-from pymongo import MongoClient
-from jose import jwt, JWTError,ExpiredSignatureError
+from jose import jwt, JWTError, ExpiredSignatureError
+
 from microservices.common.config import (
     SECRET_KEY,
     ALGORITHM,
-    MONGO_URI,
     PRODUCT_DB_NAME,
     ORDER_DB_NAME,
     AUTH_DB_NAME
 )
-import httpx
-import os
+from microservices.common.database import client, next_sequence
 
+security = HTTPBearer()
+active_connections = []
 
-security=HTTPBearer()
-active_connections=[]
+app = FastAPI()
 
-app=FastAPI()
-
-
-client = MongoClient(MONGO_URI)
 products_collection = client[PRODUCT_DB_NAME]["products"]
 orders_collection = client[ORDER_DB_NAME]["orders"]
 users_collection = client[AUTH_DB_NAME]["users"]
+counters_collection = client[PRODUCT_DB_NAME]["counters"]
 
 
 class StatusUpdate(BaseModel):
     status: str
-
-
 
 
 def get_current_admin(
@@ -44,8 +40,8 @@ def get_current_admin(
     token = credentials.credentials
     try:
         payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
-        if payload["role"]!="admin":
-            raise HTTPException(status_code=403,detail="Only admin")
+        if payload["role"] != "admin":
+            raise HTTPException(status_code=403, detail="Only admin")
         return payload
 
     except ExpiredSignatureError:
@@ -54,27 +50,61 @@ def get_current_admin(
         raise HTTPException(status_code=401, detail="Invalid token")
 
 
-
 # =========================
 # ADMIN orders
 # =========================
 @app.get("/admin/orders")
-def admin_orders(user=Depends(get_current_admin)):
+async def admin_orders(
+    page: int = Query(1, ge=1),
+    limit: int = Query(50, ge=1, le=100),
+    status_filter: str | None = Query(None, alias="status"),
+    user=Depends(get_current_admin)
+):
     if user["role"] != "admin":
         raise HTTPException(status_code=403, detail="Admin only")
 
-    orders = list(orders_collection.find())
+    match_stage = {}
+    if status_filter:
+        match_stage["status"] = status_filter
+
+    skip = (page - 1) * limit
+    pipeline = [
+        {"$match": match_stage},
+        {
+            "$facet": {
+                "metadata": [{"$count": "total"}],
+                "orders": [
+                    {"$sort": {"created_at": -1}},
+                    {"$skip": skip},
+                    {"$limit": limit}
+                ]
+            }
+        }
+    ]
+
+    res = await orders_collection.aggregate(pipeline).to_list(length=1)
+    facet = res[0] if res else {}
+
+    total = facet.get("metadata", [{}])[0].get("total", 0) if facet.get("metadata") else 0
+    orders = facet.get("orders", [])
+
     for o in orders:
         o["_id"] = str(o["_id"])
-    return orders
+
+    return {
+        "orders": orders,
+        "total": total,
+        "page": page,
+        "limit": limit
+    }
 
 
 @app.put("/admin/orders/{order_id}/status")
-def update_status(order_id: str, status: str, user=Depends(get_current_admin)):
+async def update_status(order_id: str, status: str, user=Depends(get_current_admin)):
     if user["role"] != "admin":
         raise HTTPException(status_code=403, detail="Admin only")
 
-    order = orders_collection.find_one({"_id": ObjectId(order_id)})
+    order = await orders_collection.find_one({"_id": ObjectId(order_id)})
     if not order:
         raise HTTPException(status_code=404, detail="Order not found")
 
@@ -88,7 +118,7 @@ def update_status(order_id: str, status: str, user=Depends(get_current_admin)):
     if status not in transitions[order["status"]]:
         raise HTTPException(status_code=400, detail="Invalid status change")
 
-    orders_collection.update_one(
+    await orders_collection.update_one(
         {"_id": ObjectId(order_id)},
         {"$set": {"status": status}}
     )
@@ -96,25 +126,18 @@ def update_status(order_id: str, status: str, user=Depends(get_current_admin)):
     return {"message": "Status updated"}
 
 
-
 # =========================
 # ADMIN stats
 # =========================
 
-
-
 @app.get("/admin/stats")
-def admin_stats(user=Depends(get_current_admin)):
+async def admin_stats(user=Depends(get_current_admin)):
     if user["role"] != "admin":
         raise HTTPException(status_code=403, detail="Admin access required")
-
-    from datetime import datetime
-    from calendar import monthrange
 
     now = datetime.now()
     start_of_this_month = datetime(now.year, now.month, 1)
 
-    # Previous month
     if now.month == 1:
         prev_year = now.year - 1
         prev_month = 12
@@ -124,48 +147,86 @@ def admin_stats(user=Depends(get_current_admin)):
 
     start_of_last_month = datetime(prev_year, prev_month, 1)
 
-    # Fetch orders
-    all_orders = list(orders_collection.find())
-    delivered_orders = [o for o in all_orders if o["status"].lower() == "delivered"]
-    cancelled_orders = [o for o in all_orders if o["status"].lower() == "cancelled"]
+    pipeline = [
+        {
+            "$facet": {
+                "total_orders": [{"$count": "count"}],
+                "cancelled_orders": [
+                    {"$match": {"status": {"$regex": "^cancelled$", "$options": "i"}}},
+                    {"$count": "count"}
+                ],
+                "delivered_stats": [
+                    {"$match": {"status": {"$regex": "^delivered$", "$options": "i"}}},
+                    {
+                        "$group": {
+                            "_id": None,
+                            "total_revenue": {"$sum": "$total"},
+                            "delivered_count": {"$sum": 1},
+                            "this_month_revenue": {
+                                "$sum": {
+                                    "$cond": [
+                                        {"$gte": ["$created_at", start_of_this_month]},
+                                        "$total",
+                                        0
+                                    ]
+                                }
+                            },
+                            "last_month_revenue": {
+                                "$sum": {
+                                    "$cond": [
+                                        {
+                                            "$and": [
+                                                {"$gte": ["$created_at", start_of_last_month]},
+                                                {"$lt": ["$created_at", start_of_this_month]}
+                                            ]
+                                        },
+                                        "$total",
+                                        0
+                                    ]
+                                }
+                            }
+                        }
+                    }
+                ]
+            }
+        }
+    ]
 
-    total_orders = len(all_orders)
-    total_revenue = sum(o.get("total", 0) for o in delivered_orders)
+    res = await orders_collection.aggregate(pipeline).to_list(length=1)
+    facet = res[0] if res else {}
 
-    # Cancellation Rate
+    total_orders = facet.get("total_orders", [{}])[0].get("count", 0) if facet.get("total_orders") else 0
+    cancelled_count = facet.get("cancelled_orders", [{}])[0].get("count", 0) if facet.get("cancelled_orders") else 0
+
+    deliv_list = facet.get("delivered_stats", [])
+    deliv = deliv_list[0] if deliv_list else {}
+
+    total_revenue = deliv.get("total_revenue", 0)
+    delivered_count = deliv.get("delivered_count", 0)
+    this_month_revenue = deliv.get("this_month_revenue", 0)
+    last_month_revenue = deliv.get("last_month_revenue", 0)
+
     cancellation_rate = (
-        (len(cancelled_orders) / total_orders) * 100
+        round((cancelled_count / total_orders) * 100, 2)
         if total_orders > 0 else 0
     )
 
-    # Average Order Value
     average_order_value = (
-        total_revenue / len(delivered_orders)
-        if len(delivered_orders) > 0 else 0
-    )
-
-    # Revenue Growth %
-    this_month_revenue = sum(
-        o["total"] for o in delivered_orders
-        if o["created_at"] >= start_of_this_month
-    )
-
-    last_month_revenue = sum(
-        o["total"] for o in delivered_orders
-        if start_of_last_month <= o["created_at"] < start_of_this_month
+        round(total_revenue / delivered_count, 2)
+        if delivered_count > 0 else 0
     )
 
     revenue_growth = (
-        ((this_month_revenue - last_month_revenue) / last_month_revenue) * 100
+        round(((this_month_revenue - last_month_revenue) / last_month_revenue) * 100, 2)
         if last_month_revenue > 0 else 0
     )
 
     return {
         "total_orders": total_orders,
         "total_revenue": total_revenue,
-        "cancellation_rate": round(cancellation_rate, 2),
-        "average_order_value": round(average_order_value, 2),
-        "revenue_growth": round(revenue_growth, 2)
+        "cancellation_rate": cancellation_rate,
+        "average_order_value": average_order_value,
+        "revenue_growth": revenue_growth
     }
 
 
@@ -182,19 +243,16 @@ async def add_product(
     if user["role"] != "admin":
         raise HTTPException(status_code=403, detail="Admin only")
 
-    # 1️⃣ Create uploads folder if not exists
-    os.makedirs("uploads", exist_ok=True)
+    upload_dir = os.getenv("UPLOAD_DIR", "uploads")
+    os.makedirs(upload_dir, exist_ok=True)
 
-    # 2️⃣ Save image
-    file_path = f"uploads/{image.filename}"
+    file_path = os.path.join(upload_dir, image.filename)
     with open(file_path, "wb") as buffer:
         shutil.copyfileobj(image.file, buffer)
 
-    # 3️⃣ Create product_id automatically
-    product_id = products_collection.count_documents({}) + 1
+    product_id = await next_sequence(counters_collection, "product_id")
 
-    # 4️⃣ Insert into DB
-    products_collection.insert_one({
+    await products_collection.insert_one({
         "product_id": product_id,
         "name": name,
         "price": price,
@@ -207,58 +265,43 @@ async def add_product(
     return {"message": "Product added successfully"}
 
 
-
 @app.get("/admin/stats/category_sales")
-def admin_stats(user=Depends(get_current_admin)):
+async def admin_category_sales(user=Depends(get_current_admin)):
     if user["role"] != "admin":
         raise HTTPException(status_code=403, detail="Admin access required")
 
-    try:
-        pipeline = [
-            {"$match": {"status": {"$regex":"^delivered$", "$options":"i"}}},
-            {"$unwind": "$items"},
-            {
-                "$lookup": {
-                    "from": "products",
-                    "localField": "items.product_id",
-                    "foreignField": "product_id",
-                    "as": "product_info"
-                }
-            },
-            {"$unwind": "$product_info"},
-            {
-                "$group": {
-                    "_id": "$product_info.category",
-                    "revenue": {
-                        "$sum":{
-                            "$multiply":[
-                                "$items.qty",
-                                "$items.price"
-                            ]
-                        }
+    pipeline = [
+        {"$match": {"status": {"$regex": "^delivered$", "$options": "i"}}},
+        {"$unwind": "$items"},
+        {
+            "$group": {
+                "_id": "$items.category",
+                "revenue": {
+                    "$sum": {
+                        "$multiply": [
+                            "$items.qty",
+                            "$items.price"
+                        ]
                     }
                 }
-            },
-            {"$sort": {"revenue": -1}},
-        ]
-        results=list(orders_collection.aggregate(pipeline))
-
-        formatted=[
-            {
-                "category":r["_id"],
-                "revenue":r["revenue"]
             }
-            for r in results
-        ]
-        return formatted
-    except Exception as e:
-        print(e)
-        raise HTTPException(status_code=404, detail="Product not found")
+        },
+        {"$sort": {"revenue": -1}}
+    ]
+    results = await orders_collection.aggregate(pipeline).to_list(length=None)
 
+    formatted = [
+        {
+            "category": r["_id"] if r["_id"] is not None else "Uncategorized",
+            "revenue": r["revenue"]
+        }
+        for r in results
+    ]
+    return formatted
 
 
 @app.get("/admin/stats/monthly")
-def get_monthly_stats(user=Depends(get_current_admin)):
+async def get_monthly_stats(user=Depends(get_current_admin)):
     if user["role"] != "admin":
         raise HTTPException(status_code=403, detail="Admin only")
 
@@ -286,12 +329,12 @@ def get_monthly_stats(user=Depends(get_current_admin)):
             }
         ]
 
-        results = list(orders_collection.aggregate(pipeline))
+        results = await orders_collection.aggregate(pipeline).to_list(length=None)
 
         formatted = []
         for r in results:
             month_number = r["_id"]["month"]
-            month_name = month_abbr[month_number]  # Jan, Feb, Mar...
+            month_name = month_abbr[month_number]
             formatted.append({
                 "month": month_name,
                 "revenue": r["revenue"]
@@ -304,65 +347,63 @@ def get_monthly_stats(user=Depends(get_current_admin)):
         raise HTTPException(status_code=500, detail="Error calculating monthly stats")
 
 
-
-
 @app.get("/admin/stats/bestsellers")
-def best_sellers(user=Depends(get_current_admin)):
+async def best_sellers(user=Depends(get_current_admin)):
     if user["role"] != "admin":
         raise HTTPException(status_code=403, detail="Admin only")
 
-    orders = list(orders_collection.find({"status":"delivered"}))
+    pipeline = [
+        {"$match": {"status": "delivered"}},
+        {"$unwind": "$items"},
+        {
+            "$group": {
+                "_id": "$items.product_id",
+                "name": {"$first": "$items.name"},
+                "image": {"$first": "$items.image"},
+                "total_sold": {"$sum": "$items.qty"},
+                "revenue": {"$sum": {"$multiply": ["$items.qty", "$items.price"]}}
+            }
+        },
+        {"$sort": {"total_sold": -1}},
+        {"$limit": 5},
+        {
+            "$project": {
+                "_id": 0,
+                "product_id": "$_id",
+                "name": 1,
+                "image": 1,
+                "total_sold": 1,
+                "revenue": 1
+            }
+        }
+    ]
 
-    sales = {}
-
-    for order in orders:
-        for item in order["items"]:
-            pid = item["product_id"]
-
-            if pid not in sales:
-                sales[pid] = {
-                    "product_id": pid,
-                    "name": item["name"],
-                    "image": item["image"],
-                    "total_sold": 0,
-                    "revenue": 0
-                }
-
-            sales[pid]["total_sold"] += item["qty"]
-            sales[pid]["revenue"] += item["qty"] * item["price"]
-
-    # Convert dict → list and sort
-    result = sorted(
-        sales.values(),
-        key=lambda x: x["total_sold"],
-        reverse=True
-    )[:5]
-
-    return {"products": result}
+    products = await orders_collection.aggregate(pipeline).to_list(length=None)
+    return {"products": products}
 
 
 @app.get("/admin/stats/order-ratio")
-def order_status_ration(user=Depends(get_current_admin)):
-    if user["role"]!="admin":
+async def order_status_ration(user=Depends(get_current_admin)):
+    if user["role"] != "admin":
         raise HTTPException(status_code=403, detail="Admin only")
     try:
         pipeline = [
             {
                 "$group": {
-                    "_id":"$status",
-                    "count":{"$sum":1}
+                    "_id": "$status",
+                    "count": {"$sum": 1}
                 }
             }
         ]
-        results = list(orders_collection.aggregate(pipeline))
-        data={
-            "delivered":0,
-            "cancelled":0,
-            "pending":0,
-            "shipped":0,
+        results = await orders_collection.aggregate(pipeline).to_list(length=None)
+        data = {
+            "delivered": 0,
+            "cancelled": 0,
+            "pending": 0,
+            "shipped": 0,
         }
         for r in results:
-            data[r["_id"]]=r["count"]
+            data[r["_id"]] = r["count"]
 
         return data
     except Exception as e:
@@ -370,72 +411,144 @@ def order_status_ration(user=Depends(get_current_admin)):
         raise HTTPException(status_code=500, detail="Error calculating order ratio")
 
 
-
 @app.get("/admin/stats/pending")
-def pending_stats(user=Depends(get_current_admin)):
+async def pending_stats(
+    page: int = Query(1, ge=1),
+    limit: int = Query(50, ge=1, le=100),
+    user=Depends(get_current_admin)
+):
     if user["role"] != "admin":
         raise HTTPException(status_code=403, detail="Admin only")
 
-    orders = list(orders_collection.find({"status":"pending"}))
-    total_pending_cost = sum(o.get("total", 0) for o in orders)
+    skip = (page - 1) * limit
+    pipeline = [
+        {"$match": {"status": "pending"}},
+        {
+            "$facet": {
+                "metadata": [
+                    {
+                        "$group": {
+                            "_id": None,
+                            "pending_cost": {"$sum": "$total"},
+                            "total": {"$sum": 1}
+                        }
+                    }
+                ],
+                "orders": [
+                    {"$sort": {"created_at": -1}},
+                    {"$skip": skip},
+                    {"$limit": limit}
+                ]
+            }
+        }
+    ]
+
+    res = await orders_collection.aggregate(pipeline).to_list(length=1)
+    facet = res[0] if res else {}
+
+    meta = facet.get("metadata", [{}])[0] if facet.get("metadata") else {}
+    pending_cost = meta.get("pending_cost", 0)
+    total = meta.get("total", 0)
+
+    orders = facet.get("orders", [])
     for o in orders:
-        o["_id"]=str(o["_id"])
+        o["_id"] = str(o["_id"])
+
     return {
         "pending_orders": orders,
-        "pending_cost": total_pending_cost
+        "pending_cost": pending_cost,
+        "total": total,
+        "page": page,
+        "limit": limit
     }
 
 
 @app.get("/admin/stats/cancelled")
-def cancelled_stats(user=Depends(get_current_admin)):
+async def cancelled_stats(
+    page: int = Query(1, ge=1),
+    limit: int = Query(50, ge=1, le=100),
+    user=Depends(get_current_admin)
+):
     if user["role"] != "admin":
         raise HTTPException(status_code=403, detail="Admin only")
 
-    orders = list(orders_collection.find({"status":"cancelled"}))
-    cancelled_orders_cost= sum(o.get("total", 0) for o in orders)
+    skip = (page - 1) * limit
+    pipeline = [
+        {"$match": {"status": "cancelled"}},
+        {
+            "$facet": {
+                "metadata": [
+                    {
+                        "$group": {
+                            "_id": None,
+                            "cancelled_cost": {"$sum": "$total"},
+                            "total": {"$sum": 1}
+                        }
+                    }
+                ],
+                "orders": [
+                    {"$sort": {"created_at": -1}},
+                    {"$skip": skip},
+                    {"$limit": limit}
+                ]
+            }
+        }
+    ]
 
+    res = await orders_collection.aggregate(pipeline).to_list(length=1)
+    facet = res[0] if res else {}
+
+    meta = facet.get("metadata", [{}])[0] if facet.get("metadata") else {}
+    cancelled_cost = meta.get("cancelled_cost", 0)
+    total = meta.get("total", 0)
+
+    orders = facet.get("orders", [])
     for o in orders:
         o["_id"] = str(o["_id"])
+
     return {
         "cancelled_orders": orders,
-         "cancelled_cost": cancelled_orders_cost
+        "cancelled_cost": cancelled_cost,
+        "total": total,
+        "page": page,
+        "limit": limit
     }
 
 
-
-
 @app.get("/admin/users/search")
-def search_users(q: str, user=Depends(get_current_admin)):
+async def search_users(
+    q: str = Query(..., max_length=100),
+    user=Depends(get_current_admin)
+):
     if user["role"] != "admin":
         raise HTTPException(status_code=403, detail="Admin only")
 
-    # This searches both the email and the nested full_name inside profile
-    users = list(
-        users_collection.find(
-            {
-                "$or": [
-                    {"email": {"$regex": q, "$options": "i"}},
-                    {"profile.full_name": {"$regex": q, "$options": "i"}}
-                ]
-            },
-            {"_id": 0, "password_hash": 0}
-        )
-    )
+    q_clean = q.strip()
+    if not q_clean:
+        return {"users": []}
+
+    # Tradeoff: Anchored prefix regex (^re.escape(q)) allows MongoDB to utilize B-tree indexes on email/profile.full_name while preventing catastrophic backtracking, unlike unanchored regexes.
+    safe_pattern = "^" + re.escape(q_clean)
+
+    users = await users_collection.find(
+        {
+            "$or": [
+                {"email": {"$regex": safe_pattern, "$options": "i"}},
+                {"profile.full_name": {"$regex": safe_pattern, "$options": "i"}}
+            ]
+        },
+        {"_id": 0, "password_hash": 0}
+    ).to_list(length=None)
 
     return {"users": users}
 
 
-
-
-
-
 @app.put("/admin/promote/{user_id}")
-def promote_to_admin(user_id: int, current_user=Depends(get_current_admin)):
+async def promote_to_admin(user_id: int, current_user=Depends(get_current_admin)):
     if current_user["role"] != "admin":
         raise HTTPException(status_code=403, detail="Not authorized")
 
-    # Use the integer user_id instead of the MongoDB ObjectId
-    result = users_collection.update_one(
+    result = await users_collection.update_one(
         {"user_id": user_id},
         {"$set": {"role": "admin"}}
     )
@@ -447,11 +560,11 @@ def promote_to_admin(user_id: int, current_user=Depends(get_current_admin)):
 
 
 @app.put("/admin/products/{product_id}/stock")
-def update_product_stock(product_id: int, qty: int, user=Depends(get_current_admin)):
+async def update_product_stock(product_id: int, qty: int, user=Depends(get_current_admin)):
     if user["role"] != "admin":
         raise HTTPException(status_code=403, detail="Admin only")
 
-    result = products_collection.update_one(
+    result = await products_collection.update_one(
         {"product_id": product_id},
         {"$set": {"qty": qty}}
     )
@@ -463,11 +576,10 @@ def update_product_stock(product_id: int, qty: int, user=Depends(get_current_adm
 
 
 @app.get("/admin/stats/top-customers")
-def get_top_customers(user=Depends(get_current_admin)):
+async def get_top_customers(user=Depends(get_current_admin)):
     if user["role"] != "admin":
         raise HTTPException(status_code=403, detail="Admin only")
 
-    # Aggregate orders by user_id
     pipeline = [
         {"$match": {"status": "delivered"}},
         {"$group": {
@@ -480,12 +592,5 @@ def get_top_customers(user=Depends(get_current_admin)):
         {"$limit": 5}
     ]
 
-    results = list(orders_collection.aggregate(pipeline))
+    results = await orders_collection.aggregate(pipeline).to_list(length=None)
     return results
-
-
-
-
-
-
-#uvicorn microservices.admin_service.main:app --reload --port 8005
